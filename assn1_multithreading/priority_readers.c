@@ -2,19 +2,17 @@
 #include <stdlib.h>
 #include <pthread.h>
 
-#define BUF_SIZE 3 /* Size of shared buffer */
-#define MAX_NUM 10
 #define NUM_WRITER_THREADS 5
-#define NUM_READER_THREADS 20
+#define NUM_READER_THREADS 5
+#define MAX_ACCESSES 2
+#define UPPER 6
+#define LOWER 1
 
-int buffer[BUF_SIZE]; /* shared buffer */
-int add = 0;          /* place to add next element */
-int rem = 0;          /* place to remove next element */
-int num = 0;          /* number elements in buffer */
-
-pthread_mutex_t m = PTHREAD_MUTEX_INITIALIZER;      /* mutex lock for buffer */
-pthread_cond_t c_reader = PTHREAD_COND_INITIALIZER; /* reader waits on this cond var */
-pthread_cond_t c_writer = PTHREAD_COND_INITIALIZER; /* writer waits on this cond var */
+pthread_mutex_t counter_mutex = PTHREAD_MUTEX_INITIALIZER;
+pthread_cond_t read_phase = PTHREAD_COND_INITIALIZER;
+pthread_cond_t write_phase = PTHREAD_COND_INITIALIZER;
+int resource_counter = 0;
+int shared_val = 0;
 
 void *writer(void *param);
 void *reader(void *param);
@@ -60,83 +58,69 @@ int main(int argc, char *argv[])
     return 0;
 }
 
-/* Produce value(s) */
-void *writer(void *param)
-{
-    while (num < MAX_NUM)
-    {
-
-        /* Insert into buffer */
-        pthread_mutex_lock(&m);
-        /* overflow */
-        if (add > BUF_SIZE)
-        {
-            exit(1);
-        }
-
-        /* block if buffer is full */
-        while (add == BUF_SIZE)
-        {
-            add = 0;
-            printf("writer filled buffer, waiting\n");
-            pthread_cond_wait(&c_writer, &m);
-        }
-        if (num >= MAX_NUM)
-        {
-            return 0;
-        }
-
-        /* if executing here, buffer not full so add element */
-        // sleep(2);
-        buffer[add] = num;
-        printf("wrote: %d on pos: %d\n", num, add);
-        add = add + 1;
-        num++;
-        fflush(stdout);
-        pthread_mutex_unlock(&m);
-        pthread_cond_signal(&c_reader);
-    }
-
-    printf("writer quiting\n");
-    fflush(stdout);
-    return 0;
-}
-
-/* Consume value(s); Note the reader never terminates */
 void *reader(void *param)
 {
 
-    int i;
-    while (num < MAX_NUM)
+    for (int reads_per_thread = 0; reads_per_thread < MAX_ACCESSES; reads_per_thread++)
     {
-        pthread_mutex_lock(&m);
-        /* underflow */
-        if (rem < 0)
-        {
-            exit(1);
-        }
 
-        /* block if buffer empty */
-        while (rem == BUF_SIZE || rem > add)
+        pthread_mutex_lock(&counter_mutex);
+        while (resource_counter == -1)
         {
-            printf("reader end of buffer\n");
-            rem = 0;
-            pthread_cond_wait(&c_reader, &m);
+            pthread_cond_wait(&read_phase, &counter_mutex);
         }
+        resource_counter++;
+        pthread_mutex_unlock(&counter_mutex);
 
-        /* if executing here, buffer not empty so remove element */
-        if (num >= MAX_NUM)
+        // read data phase
+        int num = (rand() %
+                   (UPPER - LOWER + 1)) +
+                  LOWER;
+        sleep(num);
+        printf("Read data: %d, readers: %d \n", shared_val, resource_counter);
+        // end reading
+
+        pthread_mutex_lock(&counter_mutex);
+        resource_counter--;
+        if (resource_counter == 0)
         {
-            return 0;
+            // printf("Reader: resource free\n");
+            pthread_cond_signal(&write_phase);
         }
-        i = buffer[rem];
-        printf("read: %d on pos: %d \n", i, rem);
-        rem = rem + 1;
-        fflush(stdout);
-        pthread_mutex_unlock(&m);
-        pthread_cond_signal(&c_writer);
+        pthread_mutex_unlock(&counter_mutex);
     }
-    printf("reader quiting\n");
-    fflush(stdout);
-    return 0;
+}
+
+void *writer(void *param)
+{
+    for (int writes_per_thread = 0; writes_per_thread < MAX_ACCESSES; writes_per_thread++)
+    {
+
+        pthread_mutex_lock(&counter_mutex);
+        while (resource_counter != 0)
+        {
+            pthread_cond_wait(&write_phase, &counter_mutex);
+        }
+        resource_counter = -1;
+        pthread_mutex_unlock(&counter_mutex);
+
+        // write data phase
+        int num = (rand() %
+                   (UPPER - LOWER + 1)) +
+                  LOWER;
+        sleep(num);
+        shared_val++;
+        printf("Wrote data: %d, readers: %d \n", shared_val, resource_counter);
+        // end writing
+
+        pthread_mutex_lock(&counter_mutex);
+        resource_counter = 0;
+        if (resource_counter == 0)
+        {
+            // printf("Writer: resource free\n");
+            pthread_cond_broadcast(&read_phase);
+            pthread_cond_signal(&write_phase);
+        }
+        pthread_mutex_unlock(&counter_mutex);
+    }
 }
